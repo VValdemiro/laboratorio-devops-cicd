@@ -1,0 +1,59 @@
+name: Pipeline CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build_ecr:
+    name: build_ecr
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.3.1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      - name: Build, Tag, and Push image to Amazon ECR
+        run: |
+          docker build -t meu-website:v1.0 .
+          docker tag meu-website:v1.0 642328613004.dkr.ecr.eu-north-1.amazonaws.com/meu-website-prod:v1.0
+          docker push 642328613004.dkr.ecr.eu-north-1.amazonaws.com/meu-website-prod:v1.0
+
+  deploy_ec2:
+    name: deploy_ec2
+    needs: build_ecr
+    env:
+      INSTANCE_KEY: ${{ secrets.INSTANCE_KEY }}
+      PUBLIC_IP: ${{ secrets.PUBLIC_IP }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy EC2 via SSH
+        run: |
+          echo "$INSTANCE_KEY" > chave-site.pem
+          chmod 400 chave-site.pem
+          ssh -i chave-site.pem -o StrictHostKeyChecking=no ec2-user@$PUBLIC_IP << EOF
+            aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin 642328613004.dkr.ecr.eu-north-1.amazonaws.com
+            docker pull 642328613004.dkr.ecr.eu-north-1.amazonaws.com/meu-website-prod:v1.0
+            echo "parando container antigo"
+            docker stop meu-website-prod || true
+            echo "removendo container antigo"
+            docker rm meu-website-prod || true
+            echo "rodando nova imagem"
+            docker run -d -p 80:80 --name meu-website-prod --restart always 642328613004.dkr.ecr.eu-north-1.amazonaws.com/meu-website-prod:v1.0
+            echo "Deploy concluido!"
+            docker ps
+          EOF
+          rm chave-site.pem
